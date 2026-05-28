@@ -9,7 +9,11 @@ from pathlib import Path
 from typing import Sequence
 from omegaconf import OmegaConf
 
-from starVLA.dataloader.gr00t_lerobot.datasets import LeRobotSingleDataset, LeRobotMixtureDataset
+from starVLA.dataloader.gr00t_lerobot.datasets import (
+    LeRobotSingleDataset, 
+    LeRobotMixtureDataset,
+    X2WLeRobotSingleDataset
+)
 from starVLA.dataloader.gr00t_lerobot.registry import (
     ROBOT_TYPE_CONFIG_MAP,
     DATASET_NAMED_MIXTURES,
@@ -49,6 +53,7 @@ def make_LeRobotSingleDataset(
     
     video_backend = data_cfg.get("video_backend", "decord") if data_cfg else "torchvision_av"
 
+
     # Opt-in factory hook: a DataConfig may define ``make_dataset(dataset_name=..., **ds_kwargs)``
     # to swap in a custom dataset class (e.g. with per-task filtering / chunk stride).
     # When absent, fall through to the default LeRobotSingleDataset construction below.
@@ -64,7 +69,8 @@ def make_LeRobotSingleDataset(
             dataset_name=data_name,
         )
 
-    return LeRobotSingleDataset(
+    TargetDatasetClass = X2WLeRobotSingleDataset if "x2w" in robot_type else LeRobotSingleDataset
+    return TargetDatasetClass(
         dataset_path=dataset_path,
         modality_configs=modality_config,
         transforms=transforms,
@@ -102,6 +108,7 @@ def get_vla_dataset(
 
     dataset_mixture = []
     for d_name, d_weight, robot_type in filtered_mixture_spec:
+        # append(dataset, weight) to the mixture list
         dataset_mixture.append((make_LeRobotSingleDataset(Path(data_root_dir), d_name, robot_type, delete_pause_frame=delete_pause_frame, data_cfg=data_cfg), d_weight))
 
     return LeRobotMixtureDataset(
@@ -121,7 +128,7 @@ if __name__ == "__main__":
     import os
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config_yaml", type=str, default="./examples/LIBERO/train_files/bar/starvla_cotrain_libero.yaml", help="Path to YAML config")
+    parser.add_argument("--config_yaml", type=str, default="./starVLA/config/training/starvla_test.yaml", help="Path to YAML config")
     parser.add_argument("--data_mix", type=str, default=None, help="Override data_mix from config")
     parser.add_argument("--data_root_dir", type=str, default=None, help="Override data_root_dir from config")
     args = parser.parse_args()
@@ -145,7 +152,7 @@ if __name__ == "__main__":
     train_dataloader = DataLoader(
         dataset,
         batch_size=2,
-        num_workers=1, # For Debug
+        num_workers=0, # For Debug
         collate_fn=collate_fn,
     )
 
@@ -156,6 +163,8 @@ if __name__ == "__main__":
     from tqdm import tqdm
     count = 0
     for batch in tqdm(train_dataloader, desc="Processing Batches"):
+        print(batch[0]['lang'])
+        breakpoint()
         if count > 3:
             break
         count += 1

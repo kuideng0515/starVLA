@@ -33,6 +33,77 @@ class BaseDataConfig(ABC):
     def transform(self) -> ModalityTransform:
         pass
 
+###########################################################################################
+
+class X2WJointDataConfig:
+    embodiment_tag = EmbodimentTag.X2W
+    video_keys = [
+        "video.head_image",
+        "video.left_image",
+        "video.right_image",
+    ]
+    
+    state_keys = [
+        "state.joint_pos",
+    ]
+    action_keys = [
+        "action.joint_pos",
+        "action.wheel_vel",
+    ]
+    
+    language_keys = ["annotation.human.action.task_description"]
+
+    # relative time offset
+    observation_indices = [0]
+    action_indices = list(range(50))
+
+    def modality_config(self):
+        video_modality = ModalityConfig(
+            delta_indices=self.observation_indices,
+            modality_keys=self.video_keys,
+        )
+        state_modality = ModalityConfig(
+            delta_indices=self.observation_indices,
+            modality_keys=self.state_keys,
+        )
+        action_modality = ModalityConfig(
+            delta_indices=self.action_indices,
+            modality_keys=self.action_keys,
+        )
+        language_modality = ModalityConfig(
+            delta_indices=self.observation_indices,
+            modality_keys=self.language_keys,
+        )
+        modality_configs = {
+            "video": video_modality,
+            "state": state_modality,
+            "action": action_modality,
+            "language": language_modality,
+        }
+        return modality_configs
+
+    def transform(self):
+        transforms = [
+            # action transforms
+            StateActionToTensor(apply_to=self.state_keys),
+            StateActionTransform(
+                apply_to=self.state_keys,
+                normalization_modes={
+                    "state.joint_pos": "q99",
+                },
+            ),
+            # action transforms
+            StateActionToTensor(apply_to=self.action_keys),
+            StateActionTransform(
+                apply_to=self.action_keys,
+                normalization_modes={
+                    "action.joint_pos": "q99",
+                    "action.wheel_vel": "min_max",
+                },
+            ),
+        ]
+
+        return ComposedModalityTransform(transforms=transforms)
 
 ###########################################################################################
 
@@ -1080,6 +1151,7 @@ class VLAArenaFrankaDataConfig:
 ###########################################################################################
 
 ROBOT_TYPE_CONFIG_MAP = {
+    "x2w": X2WJointDataConfig(),
     "libero_franka": Libero4in1DataConfig(),
     "oxe_droid": OxeDroidDataConfig(),
     "oxe_bridge": OxeBridgeDataConfig(),

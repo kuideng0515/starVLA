@@ -19,6 +19,13 @@ DATASET_NAMED_MIXTURES = {
         ("custom_dataset_name_1", 1.0, "custom_robot_config"),
         ("custom_dataset_name_2", 1.0, "custom_robot_config"),
     ],
+    "x2w_wm_dataset": [
+        ("4473_to_4475", 1.0, "x2w"),
+    ],
+    "x2w_umi_demo": [
+        ("umi01", 1.0, "prime_umi"),
+    ],
+
 
     "libero_all": [
         ("libero_object_no_noops_1.0.0_lerobot", 1.0, "libero_franka"),

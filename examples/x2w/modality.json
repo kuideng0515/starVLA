@@ -1,0 +1,180 @@
+{
+    "state": {
+        "joint_pos": {
+            "start": 0,
+            "end": 22
+        },
+        "joint_vel": {
+            "start": 22,
+            "end": 44
+        },
+        "joint_effort": {
+            "start": 44,
+            "end": 66
+        },
+        "left_gripper_pos_x": {
+            "start": 66,
+            "end": 67
+        },
+        "left_gripper_pos_y": {
+            "start": 67,
+            "end": 68
+        },
+        "left_gripper_pos_z": {
+            "start": 68,
+            "end": 69
+        },
+        "left_gripper_quat_x": {
+            "start": 69,
+            "end": 70
+        },
+        "left_gripper_quat_y": {
+            "start": 70,
+            "end": 71
+        },
+        "left_gripper_quat_z": {
+            "start": 71,
+            "end": 72
+        },
+        "left_gripper_quat_w": {
+            "start": 72,
+            "end": 73
+        },
+        "right_gripper_pos_x": {
+            "start": 73,
+            "end": 74
+        },
+        "right_gripper_pos_y": {
+            "start": 74,
+            "end": 75
+        },
+        "right_gripper_pos_z": {
+            "start": 75,
+            "end": 76
+        },
+        "right_gripper_quat_x": {
+            "start": 76,
+            "end": 77
+        },
+        "right_gripper_quat_y": {
+            "start": 77,
+            "end": 78
+        },
+        "right_gripper_quat_z": {
+            "start": 78,
+            "end": 79
+        },
+        "right_gripper_quat_w": {
+            "start": 79,
+            "end": 80
+        },
+        "wheel_pos": {
+            "start": 80,
+            "end": 83
+        },
+        "wheel_vel": {
+            "start": 83,
+            "end": 86
+        },
+        "wheel_effort": {
+            "start": 86,
+            "end": 89
+        }
+    },
+    "action": {
+        "joint_pos": {
+            "start": 0,
+            "end": 22
+        },
+        "joint_vel": {
+            "start": 22,
+            "end": 44
+        },
+        "joint_effort": {
+            "start": 44,
+            "end": 66
+        },
+        "left_gripper_pos_x": {
+            "start": 66,
+            "end": 67
+        },
+        "left_gripper_pos_y": {
+            "start": 67,
+            "end": 68
+        },
+        "left_gripper_pos_z": {
+            "start": 68,
+            "end": 69
+        },
+        "left_gripper_quat_x": {
+            "start": 69,
+            "end": 70
+        },
+        "left_gripper_quat_y": {
+            "start": 70,
+            "end": 71
+        },
+        "left_gripper_quat_z": {
+            "start": 71,
+            "end": 72
+        },
+        "left_gripper_quat_w": {
+            "start": 72,
+            "end": 73
+        },
+        "right_gripper_pos_x": {
+            "start": 73,
+            "end": 74
+        },
+        "right_gripper_pos_y": {
+            "start": 74,
+            "end": 75
+        },
+        "right_gripper_pos_z": {
+            "start": 75,
+            "end": 76
+        },
+        "right_gripper_quat_x": {
+            "start": 76,
+            "end": 77
+        },
+        "right_gripper_quat_y": {
+            "start": 77,
+            "end": 78
+        },
+        "right_gripper_quat_z": {
+            "start": 78,
+            "end": 79
+        },
+        "right_gripper_quat_w": {
+            "start": 79,
+            "end": 80
+        },
+        "wheel_pos": {
+            "start": 80,
+            "end": 83
+        },
+        "wheel_vel": {
+            "start": 83,
+            "end": 86
+        },
+        "wheel_effort": {
+            "start": 86,
+            "end": 89
+        }
+    },
+    "video": {
+        "head_image": {
+            "original_key": "observation.images.x2w_camera_head_realsense_compressed"
+        },
+        "left_image": {
+            "original_key": "observation.images.x2w_camera_left_wrist_zedxonegs_rgb_raw_image_compressed"
+        },
+        "right_image": {
+            "original_key": "observation.images.x2w_camera_right_wrist_zedxonegs_rgb_raw_image_compressed"
+        }
+    },
+    "annotation": {
+        "human.action.task_description": {"original_key": "task_index"}
+    }
+}

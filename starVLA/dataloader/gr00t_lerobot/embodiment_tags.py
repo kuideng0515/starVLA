@@ -17,6 +17,11 @@ from enum import Enum
 
 
 class EmbodimentTag(Enum):
+    X2W = 'x2w'
+    """
+    The X2W from AGIBOT.
+    """
+
     GR1 = "gr1"
     """
     The GR1 dataset.
@@ -71,6 +76,7 @@ class EmbodimentTag(Enum):
 
 # Embodiment tag string: to projector index in the Action Expert Module
 EMBODIMENT_TAG_MAPPING = {
+    EmbodimentTag.X2W: 0,
     EmbodimentTag.NEW_EMBODIMENT.value: 31,
     EmbodimentTag.OXE_DROID.value: 17,
     EmbodimentTag.OXE_BRIDGE.value: 18,
@@ -93,4 +99,5 @@ ROBOT_TYPE_TO_EMBODIMENT_TAG = {
     "demo_sim_franka_delta_joints": EmbodimentTag.FRANKA,
     "custom_robot_config": EmbodimentTag.NEW_EMBODIMENT,
     "fourier_gr1_arms_waist": EmbodimentTag.GR1,
+    "x2w": EmbodimentTag.X2W,
 }

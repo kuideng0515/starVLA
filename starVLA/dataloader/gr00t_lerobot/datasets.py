@@ -32,6 +32,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Sequence
 import os, random
+import re
 import numpy as np
 import pandas as pd
 from pydantic import BaseModel, Field, ValidationError
@@ -39,6 +40,7 @@ from torch.utils.data import Dataset
 from tqdm import tqdm
 from PIL import Image
 import torch.distributed as dist
+import bisect
 
 from starVLA.dataloader.gr00t_lerobot.video import get_all_frames, get_frames_by_timestamps
 
@@ -983,7 +985,7 @@ class LeRobotSingleDataset(Dataset):
         config_key = self._get_steps_config_key()
         steps_filename = "steps_data_index.pkl"
         steps_path = self.dataset_path / "meta" / steps_filename
-    
+
         # ---------- try to read from cache  ----------
         if steps_path.exists():
             try:
@@ -1924,6 +1926,459 @@ class LeRobotSingleDataset(Dataset):
         print(f"Used action keys (reordered): {list(used_action_keys)}")
         print(f"Used state keys (reordered): {list(used_state_keys)}")
 
+class X2WLeRobotSingleDataset(LeRobotSingleDataset):
+    def __init__(self, *args, **kwargs):
+        """
+        Loading the specific LeRobot dataset from X2W.
+        Supports filtering out idle/meaningless segments by configuring
+        ``excluded_segment_statuses`` in data_cfg.
+        """
+        # Extract excluded_statuses early so _get_steps_config_key can use it
+        data_cfg = kwargs.get("data_cfg", None)
+        self._excluded_statuses: set = set(
+            data_cfg.get("excluded_segment_statuses", [])
+        ) if data_cfg else set()
+
+        super().__init__(*args, **kwargs)
+        self._get_subepisode_info()
+        self._build_split_trajectories()
+
+    def _get_subepisode_info(self):
+        episodes = self._lerobot_info_meta.get("instruction_segments")
+        self._subepisode_info: dict[int, dict[str, list]] = {}
+        for episode_idx_str, episode_data in episodes.items():
+            episode_idx = int(episode_idx_str)
+            if not isinstance(episode_data, list):
+                raise TypeError("episode_data must be list type.")
+            starts = []
+            ends = []
+            instrs = []
+            infos = []
+            for seg in episode_data:
+                if not isinstance(seg, dict):
+                    raise TypeError("segment in episode_data must be list type.")
+
+                start = seg.get("start_frame_index")
+                end = seg.get("end_frame_index")
+                instr = seg.get("instruction")
+                info = seg.get("episode_status", "success")
+                if isinstance(start, int) and isinstance(end, int) and isinstance(instr, str):
+                    starts.append(start)
+                    ends.append(end)
+                    instrs.append(instr)
+                    infos.append(info)
+                else:
+                    raise ValueError(
+                        "start/end_frame_index must be int, instruction must be string."
+                    )
+
+            sorted_indices = sorted(range(len(starts)), key=lambda i: starts[i])
+            starts = [starts[i] for i in sorted_indices]
+            ends = [ends[i] for i in sorted_indices]
+            instrs = [instrs[i] for i in sorted_indices]
+            infos = [infos[i] for i in sorted_indices]
+
+            merged_starts = []
+            merged_ends = []
+            merged_instrs = []
+            merged_infos = []
+            for i in range(len(starts)):
+                if i == 0:
+                    merged_starts.append(starts[i])
+                    merged_ends.append(ends[i])
+                    merged_instrs.append(instrs[i])
+                    merged_infos.append(infos[i])
+                else:
+                    if instrs[i] == merged_instrs[-1] and merged_ends[-1] == starts[i]:
+                        merged_ends[-1] = max(merged_ends[-1], ends[i])
+                    else:
+                        merged_starts.append(starts[i])
+                        merged_ends.append(ends[i])
+                        merged_instrs.append(instrs[i])
+                        merged_infos.append(infos[i])
+
+            self._subepisode_info[episode_idx] = {
+                "starts": merged_starts,
+                "ends": merged_ends,
+                "instrs": merged_instrs,
+                "infos": merged_infos,
+            }
+
+        if not self._subepisode_info:
+            raise ValueError(f"No valid episode instructions found in meta/info.json")
+
+    # ------------------------------------------------------------------
+    #  Trajectory splitting
+    # ------------------------------------------------------------------
+    def _build_split_trajectories(self):
+        """
+        Split original trajectories into sub-trajectories based on valid
+        language segments.  Segments whose ``episode_status`` is listed in
+        ``excluded_segment_statuses`` are dropped.
+
+        After this method:
+        - ``self._trajectory_ids`` / ``self._trajectory_lengths`` reflect the
+          split (virtual) trajectories.
+        - ``self._all_steps`` is rebuilt.
+        - Dataset statistics are recomputed on valid frames only.
+        """
+        self._split_traj_info: dict[int, dict] = {}
+        self._orig_to_split_ids: dict[int, list[int]] = defaultdict(list)
+
+        # Save original values for potential downstream use
+        self._orig_trajectory_ids = self._trajectory_ids.copy()
+        self._orig_trajectory_lengths = self._trajectory_lengths.copy()
+        
+        if not self._excluded_statuses:
+            print("No excluded segment statuses configured, keeping original trajectories.")
+            # Still populate _split_traj_info for uniform access in overrides
+            for orig_traj_id in self._orig_trajectory_ids:
+                self._split_traj_info[int(orig_traj_id)] = {
+                    "orig_traj_id": int(orig_traj_id),
+                    "start_frame": 0,
+                    "end_frame": int(self._orig_trajectory_lengths[
+                        list(self._orig_trajectory_ids).index(orig_traj_id)
+                    ]),
+                    "instruction": "",
+                }
+                self._orig_to_split_ids[int(orig_traj_id)].append(int(orig_traj_id))
+            return
+
+        new_id = 0
+        for orig_traj_id in self._orig_trajectory_ids:
+            ep_data = self._subepisode_info.get(int(orig_traj_id))
+            if ep_data is None:
+                # No sub-episode info – keep trajectory as-is
+                length = int(self._orig_trajectory_lengths[
+                    list(self._orig_trajectory_ids).index(orig_traj_id)
+                ])
+                self._split_traj_info[new_id] = {
+                    "orig_traj_id": int(orig_traj_id),
+                    "start_frame": 0,
+                    "end_frame": length,
+                    "instruction": "",
+                }
+                self._orig_to_split_ids[int(orig_traj_id)].append(new_id)
+                new_id += 1
+                continue
+
+            for i in range(len(ep_data["starts"])):
+                info = ep_data["instrs"][i]
+                if info in self._excluded_statuses:
+                    continue
+                start = ep_data["starts"][i]
+                end = ep_data["ends"][i]
+                instr = ep_data["instrs"][i]
+
+                self._split_traj_info[new_id] = {
+                    "orig_traj_id": int(orig_traj_id),
+                    "start_frame": start,
+                    "end_frame": end,
+                    "instruction": instr,
+                }
+                self._orig_to_split_ids[int(orig_traj_id)].append(new_id)
+                new_id += 1
+        
+        # Replace trajectory arrays
+        split_ids = sorted(self._split_traj_info.keys())
+        split_lengths = np.array([
+            self._split_traj_info[sid]["end_frame"] - self._split_traj_info[sid]["start_frame"]
+            for sid in split_ids
+        ], dtype=int)
+        self._trajectory_ids = np.array(split_ids)
+        self._trajectory_lengths = split_lengths
+
+        print(
+            f"[X2W] Split {len(self._orig_trajectory_ids)} original trajectories into "
+            f"{len(self._trajectory_ids)} sub-trajectories "
+            f"(excluded statuses: {self._excluded_statuses})"
+        )
+
+        # Invalidate cached steps (they were placeholder steps from parent __init__).
+        # Only rank 0 performs the deletion to avoid a TOCTOU race among ranks.
+        steps_path = self.dataset_path / "meta" / "steps_data_index.pkl"
+        if (not dist.is_initialized() or dist.get_rank() == 0) and steps_path.exists():
+            steps_path.unlink()
+        if dist.is_initialized():
+            dist.barrier()
+
+        # Rebuild all_steps (cache miss → _get_all_steps_single_process returns real split steps)
+        self._all_steps = self._get_all_steps()
+
+        # Recompute statistics on valid segments only
+        self._recompute_statistics_on_valid_segments()
+
+    # ------------------------------------------------------------------
+    #  Statistics recomputation (valid segments only)
+    # ------------------------------------------------------------------
+    def _recompute_statistics_on_valid_segments(self):
+        """
+        Recompute dataset statistics using only frames that belong to
+        non-excluded segments.  Results replace ``self._metadata``.
+
+        Follows the same rank-0-compute / barrier / all-ranks-read pattern
+        used by ``_get_metadata`` so that only one process touches disk.
+        """
+        def _is_main():
+            return (not dist.is_initialized()) or dist.get_rank() == 0
+
+        if not self._excluded_statuses:
+            return  # nothing to filter – parent statistics are fine
+
+        # Build set of valid (orig_traj_id, frame_idx) pairs (cheap, all ranks)
+        valid_frames: dict[int, set] = defaultdict(set)
+        for info in self._split_traj_info.values():
+            orig_id = info["orig_traj_id"]
+            for f in range(info["start_frame"], info["end_frame"]):
+                valid_frames[orig_id].add(f)
+
+        if not valid_frames:
+            print("[X2W] No valid frames for statistics – keeping original stats")
+            return
+
+        # ---------- only rank 0 does the heavy I/O & computation ----------
+        if _is_main():
+            new_stats = None
+            parquet_files = sorted(list(self.dataset_path.glob(LE_ROBOT_DATA_FILENAME)))
+            all_filtered_parts: list[pd.DataFrame] = []
+            for parquet_path in tqdm(parquet_files, desc="Recomputing stats on valid segments"):
+                parquet_data = pd.read_parquet(parquet_path)
+                if self._lerobot_version == "v2.0":
+                    m = re.search(r'episode_(\d+)', parquet_path.name)
+                    if not m:
+                        continue
+                    traj_id = int(m.group(1))
+                    if traj_id not in valid_frames:
+                        continue
+                    vset = valid_frames[traj_id]
+                    mask = [i in vset for i in range(len(parquet_data))]
+                    filtered = parquet_data.iloc[mask]
+                    if len(filtered) > 0:
+                        all_filtered_parts.append(filtered)
+                elif self._lerobot_version == "v3.0":
+                    if "episode_index" not in parquet_data.columns:
+                        all_filtered_parts.append(parquet_data)
+                        continue
+                    for traj_id, vset in valid_frames.items():
+                        traj_slice = parquet_data[parquet_data["episode_index"] == traj_id]
+                        if len(traj_slice) == 0:
+                            continue
+                        mask = [i in vset for i in range(len(traj_slice))]
+                        filtered = traj_slice.iloc[mask]
+                        if len(filtered) > 0:
+                            all_filtered_parts.append(filtered)
+
+            if all_filtered_parts:
+                all_data = pd.concat(all_filtered_parts, axis=0)
+                new_stats = {}
+                for le_modality in all_data.columns:
+                    if "task_info" in le_modality:
+                        continue
+                    try:
+                        np_data = np.vstack([
+                            np.asarray(x, dtype=np.float32) for x in all_data[le_modality]
+                        ])
+                    except Exception:
+                        continue
+                    new_stats[le_modality] = {
+                        "mean": np.mean(np_data, axis=0).tolist(),
+                        "std": np.std(np_data, axis=0).tolist(),
+                        "min": np.min(np_data, axis=0).tolist(),
+                        "max": np.max(np_data, axis=0).tolist(),
+                        "q01": np.quantile(np_data, 0.01, axis=0).tolist(),
+                        "q99": np.quantile(np_data, 0.99, axis=0).tolist(),
+                    }
+
+            if new_stats is not None:
+                stats_cache_config = _build_stats_cache_config(
+                    action_mode=_normalize_action_mode(
+                        self.data_cfg.get("action_mode", "abs") if self.data_cfg else "abs"
+                    ),
+                )
+                _save_stats_cache(
+                    self.dataset_path / LE_ROBOT_STATS_FILENAME,
+                    stats_cache_config,
+                    new_stats,
+                )
+        else:
+            new_stats = None
+
+        # ---------- sync, then all ranks read the result ----------
+        if dist.is_initialized():
+            dist.barrier()
+
+        if new_stats is None:
+            new_stats = _load_stats_cache(
+                self.dataset_path / LE_ROBOT_STATS_FILENAME,
+                _build_stats_cache_config(
+                    action_mode=_normalize_action_mode(
+                        self.data_cfg.get("action_mode", "abs") if self.data_cfg else "abs"
+                    ),
+                ),
+                invalidate_legacy=False,
+            )
+            if new_stats is None:
+                print("[X2W] Stats cache missing after sync – keeping original stats")
+                return
+
+        # ---------- all ranks rebuild metadata from filtered stats ----------
+        le_modality_meta = self._lerobot_modality_meta
+        dataset_statistics: dict = {}
+        for our_modality in ["state", "action"]:
+            dataset_statistics[our_modality] = {}
+            mod_cfg = getattr(self.metadata.modalities, our_modality, {})
+            for subkey in mod_cfg:
+                dataset_statistics[our_modality][subkey] = {}
+                sa_meta = le_modality_meta.get_key_meta(f"{our_modality}.{subkey}")
+                le_key = sa_meta.original_key
+                if le_key not in new_stats:
+                    continue
+                for stat_name in new_stats[le_key]:
+                    indices = np.arange(sa_meta.start, sa_meta.end)
+                    stat = np.array(new_stats[le_key][stat_name])
+                    dataset_statistics[our_modality][subkey][stat_name] = stat[indices].tolist()
+
+        new_metadata = DatasetMetadata(
+            statistics=dataset_statistics,
+            modalities=self.metadata.modalities,
+            embodiment_tag=EmbodimentTag(self.tag),
+        )
+        self._metadata = new_metadata
+        self.set_transforms_metadata(self._metadata)
+        print(f"[X2W] Recomputed dataset statistics on valid frames "
+              f"(saved to {LE_ROBOT_STATS_FILENAME})")
+
+    # ------------------------------------------------------------------
+    #  Overrides for split-trajectory support
+    # ------------------------------------------------------------------
+    def _get_all_steps_single_process(self) -> list[tuple[int, int]]:
+        """Generate steps from (possibly split) trajectories."""
+        if hasattr(self, '_split_traj_info') and self._split_traj_info and self._excluded_statuses:
+            all_steps: list[tuple[int, int]] = []
+            for traj_id, traj_len in zip(self._trajectory_ids, self._trajectory_lengths):
+                for base_index in range(int(traj_len)):
+                    all_steps.append((int(traj_id), base_index))
+            print(
+                f"[X2W] Generated {len(all_steps)} steps from "
+                f"{len(self._trajectory_ids)} split trajectories"
+            )
+            return all_steps
+        # Called during parent __init__ before _get_subepisode_info is ready:
+        # generate placeholder steps – they will be rebuilt by _build_split_trajectories.
+        if not hasattr(self, '_subepisode_info'):
+            all_steps: list[tuple[int, int]] = []
+            for traj_id, traj_len in zip(self._trajectory_ids, self._trajectory_lengths):
+                for base_index in range(int(traj_len)):
+                    all_steps.append((int(traj_id), base_index))
+            return all_steps
+        return super()._get_all_steps_single_process()
+
+    def get_trajectory_data(self, trajectory_id: int) -> pd.DataFrame:
+        """Return sliced data for a split trajectory."""
+        info = self._split_traj_info.get(int(trajectory_id)) if hasattr(self, '_split_traj_info') else None
+        if info is None:
+            return super().get_trajectory_data(trajectory_id)
+
+        # Cache check for split ID
+        if self.curr_traj_id == trajectory_id and self.curr_traj_data is not None:
+            return self.curr_traj_data
+
+        orig_id = info["orig_traj_id"]
+        start = info["start_frame"]
+        end = info["end_frame"]
+
+        full_data = super().get_trajectory_data(orig_id)
+        sliced = full_data.iloc[start:end].copy()
+        sliced.reset_index(drop=True, inplace=True)
+        return sliced
+
+    def get_language(
+        self,
+        trajectory_id: int,
+        key: str,
+        base_index: int,
+    ) -> list[str]:
+        """
+        For split trajectories, each has a single fixed instruction.
+        Otherwise fall back to the original sub-episode lookup.
+        """
+        # Called during parent __init__ before _subepisode_info is ready:
+        # return a placeholder so the language-emptiness check passes.
+        if not hasattr(self, '_subepisode_info'):
+            step_indices = self.delta_indices[key] + base_index
+            return ["__placeholder__"] * len(step_indices)
+
+        info = self._split_traj_info.get(int(trajectory_id)) if hasattr(self, '_split_traj_info') else None
+        if info is not None and info.get("instruction", "") != "":
+            step_indices = self.delta_indices[key] + base_index
+            return [info["instruction"]] * len(step_indices)
+
+        # Fallback: original per-frame lookup (handles unsplit trajectories)
+        assert self.curr_traj_data is not None, f"No data found for {trajectory_id=}"
+        step_indices = self.delta_indices[key] + base_index
+        trajectory_index = self.get_trajectory_index(trajectory_id)
+        max_length = self.trajectory_lengths[trajectory_index]
+        step_indices = np.maximum(step_indices, 0)
+        step_indices = np.minimum(step_indices, max_length - 1)
+
+        # Use the original trajectory ID for sub-episode lookup
+        orig_traj_id = info["orig_traj_id"] if info is not None else trajectory_id
+        episode_data = self._subepisode_info.get(int(orig_traj_id))
+        if episode_data is None:
+            raise ValueError(f"No instruction found for episode {orig_traj_id}")
+        starts = episode_data["starts"]
+        ends = episode_data["ends"].copy()
+
+        # Map split-local base_index back to original frame index
+        offset = info["start_frame"] if info is not None else 0
+
+        task_lang: list[str] = []
+        for i in range(len(step_indices)):
+            orig_frame = int(step_indices[i]) + offset  # map to original frame
+            assert orig_frame >= starts[0] and orig_frame <= ends[-1], \
+                f"frame_idx {orig_frame} out of range [{starts[0]}, {ends[-1]}]"
+            pos = bisect.bisect_right(starts, orig_frame) - 1
+            task_lang.append(episode_data["instrs"][pos])
+
+        if not task_lang:
+            raise ValueError(
+                f"No instruction found for episode {orig_traj_id}, frame {base_index}"
+            )
+        return task_lang
+
+    def get_video_path(self, trajectory_id: int, key: str) -> Path:
+        """Map split trajectory ID back to original for video file path."""
+        info = self._split_traj_info.get(int(trajectory_id)) if hasattr(self, '_split_traj_info') else None
+        if info is not None:
+            trajectory_id = info["orig_traj_id"]
+        return super().get_video_path(trajectory_id, key)
+
+    def get_episode_chunk(self, ep_index: int) -> int:
+        """Map split ID → original ID before computing chunk."""
+        info = self._split_traj_info.get(int(ep_index)) if hasattr(self, '_split_traj_info') else None
+        if info is not None:
+            ep_index = info["orig_traj_id"]
+        return super().get_episode_chunk(ep_index)
+
+    def get_episode_file_index(self, ep_index: int) -> int:
+        """Map split ID → original ID."""
+        info = self._split_traj_info.get(int(ep_index)) if hasattr(self, '_split_traj_info') else None
+        if info is not None:
+            ep_index = info["orig_traj_id"]
+        return super().get_episode_file_index(ep_index)
+
+    def _get_steps_config_key(self) -> str:
+        """Include excluded_statuses in cache key so different filters get different caches."""
+        config_dict = {
+            "delete_pause_frame": self.delete_pause_frame,
+            "dataset_name": self.dataset_name,
+        }
+        if hasattr(self, '_excluded_statuses') and self._excluded_statuses:
+            config_dict["excluded_statuses"] = sorted(list(self._excluded_statuses))
+        config_str = str(sorted(config_dict.items()))
+        return hashlib.md5(config_str.encode()).hexdigest()[:12]
+
+        
 
 class CachedLeRobotSingleDataset(LeRobotSingleDataset):
     def __init__(self, img_resize: tuple[int, int] | None = None, *args, **kwargs):
